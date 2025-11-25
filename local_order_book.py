@@ -57,16 +57,22 @@ async def get_async(url: str):
             return await resp.json()
 
 
+LevelTotals = TypedDict("LevelTotals", {"qty": Decimal, "px_qty": Decimal})
+
+
 class OrderBook:
     bids: SortedDict[Decimal, Decimal]
+    bid_totals: LevelTotals
     asks: SortedDict[Decimal, Decimal]
+    ask_totals: LevelTotals
     update_id: int
     symbol_config: SymbolConfig
     depth_events_idx: int
     bid_vwap: Decimal
     ask_vwap: Decimal
-    prices: Deque[Decimal]
     prices_for: int  # Keep historical prices for the last {value} events
+    prices: Deque[Decimal]
+    prices_acc: Deque[Decimal]
     depth_level: int
     spread: Decimal
     spread_pct: Decimal
@@ -78,10 +84,13 @@ class OrderBook:
     def _init_state(self) -> None:
         self.update_id = 0
         self.bids = SortedDict({})
+        self.bid_totals = {"qty": Decimal(0), "px_qty": Decimal(0)}
         self.asks = SortedDict({})
+        self.ask_totals = {"qty": Decimal(0), "px_qty": Decimal(0)}
         self.depth_events_idx = 0
         self.prices_for = 60
         self.prices = collections.deque(maxlen=self.prices_for)
+        self.prices_acc = collections.deque([Decimal(0)], maxlen=self.prices_for + 1)
         self.depth_level = 20
         self.spread = Decimal(0)
         self.spread_pct = Decimal(0)
@@ -119,10 +128,12 @@ class OrderBook:
 
     def process_depth_updates(self, bids: DepthLevels, asks: DepthLevels):
         self.update_levels(new_ask_levels=asks, new_bid_levels=bids)
+        self.calc_vwaps()
 
-        # VWAPs
-        self.bid_vwap = self._vwap(self.bids)
-        self.ask_vwap = self._vwap(self.asks)
+    def calc_vwaps(self):
+        self.bid_vwap = self.bid_totals["px_qty"] / self.bid_totals["qty"] if self.bid_totals["qty"] else Decimal(0)
+        self.ask_vwap = self.ask_totals["px_qty"] / self.ask_totals["qty"] if self.ask_totals["qty"] else Decimal(0)
+
         self.spread = self.ask_vwap - self.bid_vwap
         self.spread_pct = (
             self.spread / self.ask_vwap * 100 if self.ask_vwap else Decimal(0)
@@ -130,17 +141,10 @@ class OrderBook:
         price = (self.bid_vwap + self.ask_vwap) / 2
 
         self.prices.append(price)
+        self.prices_acc.append(self.prices_acc[-1] + price)
 
     def calc_average_price_for(self, n: int) -> Decimal:
         return mean(list(self.prices)[-n:])
-
-    def _vwap(self, levels: SortedDict[Decimal, Decimal]) -> Decimal:
-        total_qty = total_px_qty = Decimal(0)
-        for price, qty in levels.items():
-            if qty != 0:
-                total_qty += qty
-                total_px_qty += price * qty
-        return total_px_qty / total_qty if total_qty else Decimal(0)
 
     def process_snapshot(self, snapshot: SnapshotResponse):
         asks = snapshot["asks"]
@@ -177,7 +181,9 @@ class OrderBook:
         )
         self.process_snapshot(snapshot)
         for ev in buffer:
-            print(f"Applying update from buffer: {last_id - ev['U']}, {ev['u'] - last_id}")
+            print(
+                f"Applying update from buffer: {last_id - ev['U']}, {ev['u'] - last_id}"
+            )
             self.update_levels(new_ask_levels=ev["a"], new_bid_levels=ev["b"])
             self.update_id = ev["u"]
 
@@ -196,37 +202,54 @@ class OrderBook:
         for p_str, q_str in new_levels:
             p = Decimal(p_str)
             q = Decimal(q_str)
+            old_q = self.bids.get(p, Decimal(0))
             if q <= 0:
                 self.bids.pop(p, None)
             else:
                 self.bids[p] = q
+            dq = q - old_q
+            self.bid_totals["qty"] += dq
+            self.bid_totals["px_qty"] += p * dq
         self._trim_bids()
 
     def _update_asks(self, new_levels: DepthLevels) -> None:
         for p_str, q_str in new_levels:
             p = Decimal(p_str)
             q = Decimal(q_str)
-            if Decimal(q) <= 0:
+            old_q = self.asks.get(p, Decimal(0))
+            if q <= 0:
                 self.asks.pop(p, None)
             else:
                 self.asks[p] = q
+            dq = q - old_q
+            self.ask_totals["qty"] += dq
+            self.ask_totals["px_qty"] += p * dq
         self._trim_asks()
 
     def _trim_bids(self) -> None:
         while len(self.bids) > self.depth_level:
-            self.bids.popitem(index=0)
+            p, q = self.bids.popitem(index=0)
+            self.bid_totals["qty"] -= q
+            self.bid_totals["px_qty"] -= p * q
 
     def _trim_asks(self) -> None:
         while len(self.asks) > self.depth_level:
-            self.asks.popitem(index=-1)
+            p, q = self.asks.popitem(index=-1)
+            self.ask_totals["qty"] -= q
+            self.ask_totals["px_qty"] -= p * q
+
+    def window_sum(self, n: int) -> Decimal:
+        if len(self.prices_acc) < n + 1:
+            return Decimal(0)
+        return self.prices_acc[-1] - self.prices_acc[-1 - n]
 
     @property
     def avg_price_30(self):
-        return self.calc_average_price_for(30)
+        return None if len(self.prices) < 30 else self.window_sum(30) / Decimal(30)
 
     @property
     def avg_price_60(self):
-        return self.calc_average_price_for(60)
+        return None if len(self.prices) < 60 else self.window_sum(60) / Decimal(60)
 
     def __repr__(self) -> str:
         symbol = f"\n{self.symbol_config.symbol}:"
