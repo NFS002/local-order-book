@@ -502,6 +502,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
+    { name = "sortedcontainers" },
     { name = "sortedcontainers-stubs" },
     { name = "websockets" },
 ]
@@ -509,6 +510,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.2" },
+    { name = "sortedcontainers", specifier = ">=2.4.0" },
     { name = "sortedcontainers-stubs", specifier = ">=2.4.3" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
