@@ -3,7 +3,5 @@
 - Install python 3.11
 - Install [UV](https://docs.astral.sh/uv/)
 - Clone the repo
-- `uv venv`
 - `uv sync`
-- `source .venv/bin/activate`
 - `uv run local_order_book.py`
